@@ -6,11 +6,10 @@ module.exports = function (server, config) {
     var io = socketIO.listen(server);
 
     io.sockets.on('connection', function (client) {
-        client.resources = {
-            screen: false,
-            video: true,
-            audio: false
-        };
+        registry_connect(client);
+        registry_set(client,'screen',false);
+        registry_set(client,'video',true);
+        registry_set(client,'audio',false);
 
         // pass a message to another id
         client.on('message', function (details) {
@@ -24,25 +23,28 @@ module.exports = function (server, config) {
         });
 
         client.on('shareScreen', function () {
-            client.resources.screen = true;
+            registry_set(client,'screen',true);
         });
 
         client.on('unshareScreen', function (type) {
-            client.resources.screen = false;
+            registry_set(client,'screen',false);
             removeFeed('screen');
         });
 
         client.on('join', join);
 
+        var client_room = null;
+
         function removeFeed(type) {
-            if (client.room) {
-                io.sockets.in(client.room).emit('remove', {
+            if (client_room) {
+                io.sockets.in(client_room).emit('remove', {
                     id: client.id,
                     type: type
                 });
                 if (!type) {
-                    client.leave(client.room);
-                    client.room = undefined;
+                    client.leave(client_room);
+                    registry_leave(client,client_room);
+                    client_room = undefined;
                 }
             }
         }
@@ -60,13 +62,15 @@ module.exports = function (server, config) {
             removeFeed();
             safeCb(cb)(null, describeRoom(name));
             client.join(name);
-            client.room = name;
+            client_room = name;
+            registry_join(client,client_room);
         }
 
         // we don't want to pass "leave" directly because the
         // event type string of "socket end" gets passed too.
         client.on('disconnect', function () {
             removeFeed();
+            registry_disconnect(client);
         });
         client.on('leave', function () {
             removeFeed();
@@ -123,21 +127,46 @@ module.exports = function (server, config) {
         client.emit('turnservers', credentials);
     });
 
+    var clients = {}
+    var rooms = {}
+
+    function registry_connect(client) {
+        clients[client.id] = {}
+    }
+    function registry_disconnect(client) {
+        delete clients[client.id]
+    }
+    function registry_set(client,resource,value) {
+        clients[client.id][resource] = value;
+    }
+    function registry_join(client,room) {
+        if(!(room in rooms)) {
+            rooms[room] = new Set();
+        }
+        rooms[room].add(client.id);
+    }
+    function registry_leave(client,room) {
+        rooms[room].delete(client.id);
+        if(rooms[room].size === 0) {
+            delete rooms[room];
+        }
+    }
 
     function describeRoom(name) {
-        var adapter = io.nsps['/'].adapter;
-        var clients = adapter.rooms[name] || {};
         var result = {
             clients: {}
         };
-        Object.keys(clients).forEach(function (id) {
-            result.clients[id] = adapter.nsp.connected[id].resources;
-        });
+        if(!(name in rooms)) {
+            return result;
+        }
+        for( var id of rooms[name].values() ) {
+            result.clients[id] = clients[id];
+        };
         return result;
     }
 
     function clientsInRoom(name) {
-        return io.sockets.clients(name).length;
+        return rooms[name].size;
     }
 
 };
